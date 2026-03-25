@@ -3,8 +3,6 @@ const { htmlClient, cloudGet } = require('./httpClients');
 const { parseChapterNumber, titleFromSlug } = require('./textUtils');
 const { sourceSlug } = require('./slugUtils');
 const { absoluteUrl } = require('./urlUtils');
-const { SOURCE_LECTORMANGAA } = require('./constants');
-const { getHtmlWithBrowser } = require('./browserClient');
 
 const normalizeStatus = (value) => {
     const raw = String(value || '').toLowerCase().trim();
@@ -253,29 +251,6 @@ const getLatestFromHome = async ({ baseUrl, source }) => {
                 if (cards.length > 0) return cards;
             } catch (cloudErr) {
                 lastError = cloudErr;
-            }
-        }
-    }
-
-    // Last-resort fallback for Cloudflare-protected providers.
-    if (source === SOURCE_LECTORMANGAA) {
-        const browserAttempts = [
-            { url: baseUrl, referer: baseUrl },
-            { url: `${baseUrl}/home`, referer: baseUrl },
-            { url: `${baseUrl}/biblioteca`, referer: `${baseUrl}/home` },
-            { url: `${baseUrl}/biblioteca?search=`, referer: `${baseUrl}/biblioteca` },
-        ];
-
-        for (const attempt of browserAttempts) {
-            try {
-                const html = await getHtmlWithBrowser(attempt.url, attempt.referer, source);
-                const $ = cheerio.load(html || '');
-                const cards = extractHtmlMangaCards($, baseUrl, source).slice(0, 20);
-                if (cards.length > 0) {
-                    return cards;
-                }
-            } catch (browserErr) {
-                lastError = browserErr;
             }
         }
     }

@@ -1,9 +1,7 @@
 const {
     SOURCE_ZONATMO,
     SOURCE_VISORMANGA,
-    SOURCE_LECTORMANGAA,
     VISORMANGA_BASE,
-    LECTORMANGAA_BASE,
 } = require('./constants');
 const { parseSourceSlug, splitCompositeSlug } = require('./slugUtils');
 const zonatmoProvider = require('./zonatmoProvider');
@@ -45,20 +43,6 @@ const searchManga = async (title) => {
     }
 
     if (all.length === 0) {
-        try {
-            const l = await htmlProvider.searchLibrary({
-                baseUrl: LECTORMANGAA_BASE,
-                source: SOURCE_LECTORMANGAA,
-                query: title,
-            });
-            pushMany(l);
-            console.log(`[Search][lectormangaa] ${l.length} results`);
-        } catch (err) {
-            console.warn('[Search][lectormangaa] failed:', err.message);
-        }
-    }
-
-    if (all.length === 0) {
         console.warn('[Search] No results found in configured sources.');
     }
 
@@ -90,15 +74,6 @@ const getMangaDetails = async (mangaToken) => {
         });
     }
 
-    if (source === SOURCE_LECTORMANGAA) {
-        return htmlProvider.getMangaDetails({
-            baseUrl: LECTORMANGAA_BASE,
-            source,
-            slug,
-            originalToken: mangaToken,
-        });
-    }
-
     return zonatmoProvider.getMangaDetails(mangaToken);
 };
 
@@ -122,15 +97,6 @@ const getChapterImages = async (compositeSlug) => {
             chapterSlug,
         });
         console.log(`[Chapter][visormanga] ${images.length} images for "${compositeSlug}"`);
-        return images;
-    }
-
-    if (source === SOURCE_LECTORMANGAA) {
-        const images = await htmlProvider.getChapterImages({
-            baseUrl: LECTORMANGAA_BASE,
-            chapterSlug,
-        });
-        console.log(`[Chapter][lectormangaa] ${images.length} images for "${compositeSlug}"`);
         return images;
     }
 
@@ -190,11 +156,6 @@ const getLatestWithMeta = async () => {
     await runSource(SOURCE_VISORMANGA, () => htmlProvider.getLatestFromHome({
             baseUrl: VISORMANGA_BASE,
             source: SOURCE_VISORMANGA,
-        }));
-
-    await runSource(SOURCE_LECTORMANGAA, () => htmlProvider.getLatestFromHome({
-            baseUrl: LECTORMANGAA_BASE,
-            source: SOURCE_LECTORMANGAA,
         }));
 
     return {

@@ -1,7 +1,6 @@
 const {
     SOURCE_ZONATMO,
     SOURCE_VISORMANGA,
-    SOURCE_LECTORMANGAA,
     SOURCE_DELIMITER,
 } = require('./constants');
 
@@ -22,7 +21,7 @@ const parseSourceSlug = (value) => {
     const slug = raw.slice(idx + SOURCE_DELIMITER.length);
     if (!slug) return { source: SOURCE_ZONATMO, slug: raw };
 
-    if (![SOURCE_ZONATMO, SOURCE_VISORMANGA, SOURCE_LECTORMANGAA].includes(source)) {
+    if (![SOURCE_ZONATMO, SOURCE_VISORMANGA].includes(source)) {
         return { source: SOURCE_ZONATMO, slug: raw };
     }
     return { source, slug };
