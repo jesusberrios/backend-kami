@@ -7,6 +7,66 @@ const { parseSourceSlug, splitCompositeSlug } = require('./slugUtils');
 const zonatmoProvider = require('./zonatmoProvider');
 const htmlProvider = require('./htmlProvider');
 
+const interleaveBySource = (items, maxItems = 20, options = {}) => {
+    const reserveQuota = options.reserveQuota !== false;
+    const bySource = new Map();
+    const sourceOrder = [];
+
+    for (const item of items || []) {
+        const source = String(item?.source || SOURCE_ZONATMO).toLowerCase();
+        if (!bySource.has(source)) {
+            bySource.set(source, []);
+            sourceOrder.push(source);
+        }
+        bySource.get(source).push(item);
+    }
+
+    const merged = [];
+    if (reserveQuota && sourceOrder.length > 1 && maxItems > 0) {
+        const activeSources = sourceOrder.filter((source) => {
+            const queue = bySource.get(source);
+            return Array.isArray(queue) && queue.length > 0;
+        });
+
+        if (activeSources.length > 1) {
+            const perSourceQuota = Math.max(1, Math.floor(maxItems / activeSources.length));
+            const quotaTaken = new Map(activeSources.map((source) => [source, 0]));
+
+            while (merged.length < maxItems) {
+                let pushedInRound = false;
+                for (const source of activeSources) {
+                    const queue = bySource.get(source);
+                    const taken = quotaTaken.get(source) || 0;
+                    if (!queue || queue.length === 0) continue;
+                    if (taken >= perSourceQuota) continue;
+
+                    merged.push(queue.shift());
+                    quotaTaken.set(source, taken + 1);
+                    pushedInRound = true;
+                    if (merged.length >= maxItems) break;
+                }
+
+                if (!pushedInRound) break;
+            }
+        }
+    }
+
+    while (merged.length < maxItems) {
+        let pushedInRound = false;
+        for (const source of sourceOrder) {
+            const queue = bySource.get(source);
+            if (!queue || queue.length === 0) continue;
+            merged.push(queue.shift());
+            pushedInRound = true;
+            if (merged.length >= maxItems) break;
+        }
+
+        if (!pushedInRound) break;
+    }
+
+    return merged;
+};
+
 const searchManga = async (title) => {
     const all = [];
     const seen = new Set();
@@ -20,33 +80,29 @@ const searchManga = async (title) => {
         }
     };
 
-    try {
-        const z = await zonatmoProvider.search(title);
-        pushMany(z);
-        console.log(`[Search][zonatmo] ${z.length} results`);
-    } catch (err) {
-        console.warn('[Search][zonatmo] failed:', err.message);
-    }
-
-    if (all.length === 0) {
+    const runSource = async (source, fn) => {
         try {
-            const v = await htmlProvider.searchLibrary({
-                baseUrl: VISORMANGA_BASE,
-                source: SOURCE_VISORMANGA,
-                query: title,
-            });
-            pushMany(v);
-            console.log(`[Search][visormanga] ${v.length} results`);
+            const items = await fn();
+            pushMany(items);
         } catch (err) {
-            console.warn('[Search][visormanga] failed:', err.message);
+            console.warn(`[Search][${source}] failed:`, err.message);
         }
-    }
+    };
+
+    await Promise.all([
+        runSource(SOURCE_ZONATMO, () => zonatmoProvider.search(title)),
+        runSource(SOURCE_VISORMANGA, () => htmlProvider.searchLibrary({
+            baseUrl: VISORMANGA_BASE,
+            source: SOURCE_VISORMANGA,
+            query: title,
+        })),
+    ]);
 
     if (all.length === 0) {
         console.warn('[Search] No results found in configured sources.');
     }
 
-    return all.slice(0, 20);
+    return interleaveBySource(all, 20, { reserveQuota: true });
 };
 
 const getMangaDetails = async (mangaToken) => {
@@ -96,12 +152,10 @@ const getChapterImages = async (compositeSlug) => {
             baseUrl: VISORMANGA_BASE,
             chapterSlug,
         });
-        console.log(`[Chapter][visormanga] ${images.length} images for "${compositeSlug}"`);
         return images;
     }
 
     const images = await zonatmoProvider.getChapterImages(mangaSlug, chapterSlug, compositeSlug);
-    console.log(`[Chapter][zonatmo] ${images.length} images for "${compositeSlug}"`);
     return images;
 };
 
@@ -137,7 +191,6 @@ const getLatestWithMeta = async () => {
                 durationMs: Date.now() - start,
                 error: '',
             });
-            console.log(`[Latest][${source}] ${count} manga`);
         } catch (err) {
             const message = String(err?.message || err || 'Unknown error').slice(0, 500);
             sources.push({
@@ -159,11 +212,13 @@ const getLatestWithMeta = async () => {
         })),
     ]);
 
+    const mixedResults = interleaveBySource(all, Math.max(40, all.length), { reserveQuota: true });
+
     return {
-        results: all,
+        results: mixedResults,
         diagnostics: {
             generatedAt: new Date().toISOString(),
-            total: all.length,
+            total: mixedResults.length,
             sources,
         },
     };

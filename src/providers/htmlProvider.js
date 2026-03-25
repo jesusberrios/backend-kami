@@ -4,6 +4,8 @@ const { parseChapterNumber, titleFromSlug } = require('./textUtils');
 const { sourceSlug } = require('./slugUtils');
 const { absoluteUrl } = require('./urlUtils');
 
+const ADULT_HINTS_REGEX = /\b(18\+|\+18|adult|adults|hentai|ecchi|smut|nsfw|porn|sex|erot|yaoi|yuri|doujin|doujinshi|manhwa\s*adulto?)\b/i;
+
 const normalizeStatus = (value) => {
     const raw = String(value || '').toLowerCase().trim();
     if (!raw) return 'unknown';
@@ -19,6 +21,102 @@ const buildBadges = ({ status, contentRating }) => {
     if (status === 'completed') badges.push('Finalizado');
     if (contentRating === 'erotica') badges.push('18+');
     return badges;
+};
+
+const inferContentRating = (...values) => {
+    const text = values
+        .flatMap((value) => {
+            if (!value) return [];
+            if (Array.isArray(value)) return value;
+            if (typeof value === 'object') {
+                return [value.name, value.label, value.slug, value.text, value.title, value.value];
+            }
+            return [value];
+        })
+        .map((x) => String(x || '').toLowerCase())
+        .join(' ');
+
+    return ADULT_HINTS_REGEX.test(text) ? 'erotica' : 'safe';
+};
+
+const mangaSlugFromReaderSlug = (readerSlug) => {
+    const raw = String(readerSlug || '').trim();
+    if (!raw) return '';
+
+    // Typical format: "manga-slug-123.00" -> "manga-slug"
+    const byChapterNumber = raw.replace(/-\d+(?:\.\d+)?$/i, '');
+    if (byChapterNumber && byChapterNumber !== raw) return byChapterNumber;
+
+    return raw;
+};
+
+const extractLatestFromChaptersSection = ($, baseUrl, source) => {
+    const map = new Map();
+
+    const root = $('.last-chapters-content').first();
+    if (!root.length) return [];
+
+    root.find('a[href*="/leer/"]').each((_, a) => {
+        const hrefRaw = $(a).attr('href') || '';
+        const href = absoluteUrl(baseUrl, hrefRaw);
+        const chapterMatch = href.match(/\/leer\/([^/?#]+)/i);
+        if (!chapterMatch) return;
+
+        const chapterSlug = chapterMatch[1];
+        const mangaSlug = mangaSlugFromReaderSlug(chapterSlug);
+        if (!mangaSlug) return;
+
+        const key = `${source}:${mangaSlug}`;
+        const card = $(a).closest('article, .card, .item, li, .col, .manga, .row > div');
+        const titleCandidate =
+            $(a).attr('title') ||
+            card.find('h1, h2, h3, h4, .title, .manga-title, .name').first().text().replace(/\s+/g, ' ').trim() ||
+            $(a).text().replace(/\s+/g, ' ').trim() ||
+            titleFromSlug(mangaSlug);
+
+        const img =
+            card.find('img').first().attr('data-src') ||
+            card.find('img').first().attr('src') ||
+            $(a).find('img').first().attr('data-src') ||
+            $(a).find('img').first().attr('src') ||
+            '';
+
+        const description = card.find('p, .description, .summary').first().text().replace(/\s+/g, ' ').trim();
+        const statusText = card.find('.status, .estado').first().text().trim();
+        const genres = card
+            .find('a[href*="genre"], a[href*="genero"], .genre, .genero')
+            .toArray()
+            .map((el) => $(el).text().replace(/\s+/g, ' ').trim())
+            .filter(Boolean);
+
+        const status = normalizeStatus(statusText);
+        const contentRating = inferContentRating(titleCandidate, description, genres, statusText);
+
+        const prev = map.get(key) || {
+            title: titleCandidate,
+            slug: sourceSlug(source, mangaSlug),
+            source,
+            cover: img ? absoluteUrl(baseUrl, img) : '',
+            description: description || '',
+            totalChapters: 0,
+            score: '',
+            status,
+            country: 'unknown',
+            language: 'es-419',
+            contentRating,
+            genres,
+            badges: buildBadges({ status, contentRating }),
+            url: `${baseUrl}/manga/${mangaSlug}`,
+        };
+
+        if (!prev.title || prev.title === titleFromSlug(mangaSlug)) prev.title = titleCandidate;
+        if (!prev.cover && img) prev.cover = absoluteUrl(baseUrl, img);
+        if (!prev.description && description) prev.description = description;
+
+        map.set(key, prev);
+    });
+
+    return Array.from(map.values());
 };
 
 const extractHtmlMangaCards = ($, baseUrl, source) => {
@@ -57,9 +155,7 @@ const extractHtmlMangaCards = ($, baseUrl, source) => {
             .map((el) => $(el).text().replace(/\s+/g, ' ').trim())
             .filter(Boolean);
         const status = normalizeStatus(statusText);
-        const contentRating = /yaoi|yuri|hentai|adult|erot|nsfw/i.test(`${titleCandidate} ${description}`)
-            ? 'erotica'
-            : 'safe';
+        const contentRating = inferContentRating(titleCandidate, description, genres, statusText);
 
         const prev = map.get(key) || {
             title: '',
@@ -126,9 +222,7 @@ const getMangaDetails = async ({ baseUrl, source, slug, originalToken }) => {
         .toArray()
         .map((el) => $(el).text().replace(/\s+/g, ' ').trim())
         .filter(Boolean);
-    const contentRating = /yaoi|yuri|hentai|adult|erot|nsfw/i.test(`${title} ${description}`)
-        ? 'erotica'
-        : 'safe';
+    const contentRating = inferContentRating(title, description, genres);
 
     const chapters = [];
     const seen = new Set();
@@ -238,7 +332,10 @@ const getLatestFromHome = async ({ baseUrl, source }) => {
                 headers: attempt.headers,
             });
             const $ = cheerio.load(data);
-            const cards = extractHtmlMangaCards($, baseUrl, source).slice(0, 20);
+            let cards = extractLatestFromChaptersSection($, baseUrl, source).slice(0, 20);
+            if (cards.length === 0) {
+                cards = extractHtmlMangaCards($, baseUrl, source).slice(0, 20);
+            }
             if (cards.length > 0) return cards;
         } catch (err) {
             lastError = err;
@@ -247,7 +344,10 @@ const getLatestFromHome = async ({ baseUrl, source }) => {
             try {
                 const body = await cloudGet(attempt.url, attempt.headers);
                 const $ = cheerio.load(body || '');
-                const cards = extractHtmlMangaCards($, baseUrl, source).slice(0, 20);
+                let cards = extractLatestFromChaptersSection($, baseUrl, source).slice(0, 20);
+                if (cards.length === 0) {
+                    cards = extractHtmlMangaCards($, baseUrl, source).slice(0, 20);
+                }
                 if (cards.length > 0) return cards;
             } catch (cloudErr) {
                 lastError = cloudErr;

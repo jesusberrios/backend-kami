@@ -21,8 +21,38 @@ const buildQueryCacheKey = (prefix, query) => {
     return `${prefix}:${suffix}`;
 };
 
+const STATUS_LABELS = {
+    ongoing: 'En curso',
+    completed: 'Finalizado',
+    hiatus: 'En pausa',
+    cancelled: 'Cancelado',
+    unknown: 'Desconocido',
+};
+
+const normalizeStatus = (value) => {
+    const raw = String(value || '').toLowerCase().trim();
+    if (!raw) return 'unknown';
+    if (raw.includes('ongoing') || raw.includes('curso') || raw === '1') return 'ongoing';
+    if (raw.includes('completed') || raw.includes('complet') || raw.includes('finaliz') || raw === '2') return 'completed';
+    if (raw.includes('hiatus') || raw.includes('pausa') || raw === '4') return 'hiatus';
+    if (raw.includes('cancel') || raw === '3') return 'cancelled';
+    return 'unknown';
+};
+
+const withStatusPresentation = (item) => {
+    if (!item || typeof item !== 'object') return item;
+    const normalizedStatus = normalizeStatus(item.status);
+    return {
+        ...item,
+        status: normalizedStatus,
+        statusLabel: STATUS_LABELS[normalizedStatus] || STATUS_LABELS.unknown,
+    };
+};
+
+const normalizeStatusFilterValue = (value) => normalizeStatus(value);
+
 const applyListQuery = (items, query = {}) => {
-    let list = Array.isArray(items) ? [...items] : [];
+    let list = Array.isArray(items) ? items.map(withStatusPresentation) : [];
 
     if (query.source) {
         const source = String(query.source).toLowerCase();
@@ -30,7 +60,7 @@ const applyListQuery = (items, query = {}) => {
     }
 
     if (query.status) {
-        const status = String(query.status).toLowerCase();
+        const status = normalizeStatusFilterValue(query.status);
         list = list.filter((x) => String(x.status || '').toLowerCase() === status);
     }
 
@@ -71,13 +101,11 @@ const withCache = (keyFn, options = {}) => async (req, res, next) => {
     const key = keyFn(req);
     const cached = cache.get(key);
     if (cached) {
-        console.log(`[Cache] HIT: ${key}`);
         return res.json(cached);
     }
 
     const inFlight = inFlightByKey.get(key);
     if (inFlight) {
-        console.log(`[Cache] INFLIGHT: ${key}`);
         try {
             const shared = await inFlight;
             return res.json(shared);
@@ -146,7 +174,6 @@ app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query), {
     const { title } = req.query;
     if (!title) return res.status(400).json({ error: 'Parámetro "title" requerido' });
 
-    console.log(`[Search] Buscando: "${title}"`);
     try {
         const results = await searchManga(title);
         const filtered = applyListQuery(results, req.query);
@@ -160,10 +187,9 @@ app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query), {
 // ── GET /manga/:slug ──────────────────────────────────────────────
 app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`, { ttlSeconds: 1800 }), async (req, res) => {
     const { slug } = req.params;
-    console.log(`[Manga] Detalles de: "${slug}"`);
     try {
         const manga = await getMangaDetails(slug);
-        res.sendCached({ manga });
+        res.sendCached({ manga: withStatusPresentation(manga) });
     } catch (err) {
         console.error('[Manga] Error:', err.message);
         res.status(500).json({ error: err.message });
@@ -173,7 +199,6 @@ app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`, { ttlSeco
 // ── GET /manga/:slug/chapters ─────────────────────────────────────
 app.get('/manga/:slug/chapters', withCache((req) => `chapters:${req.params.slug}`, { ttlSeconds: 1800 }), async (req, res) => {
     const { slug } = req.params;
-    console.log(`[Chapters] Capítulos de: "${slug}"`);
     try {
         const chapters = await getMangaChapters(slug);
         res.sendCached({ chapters });
@@ -190,7 +215,6 @@ app.get('/chapter/:mangaSlug/:chapterSlug/images',
     async (req, res) => {
         const { mangaSlug, chapterSlug } = req.params;
         const compositeSlug = `${mangaSlug}/${chapterSlug}`;
-        console.log(`[Images] Imágenes del capítulo: "${compositeSlug}"`);
         try {
             const images = await getChapterImages(compositeSlug);
             if (!images.length) return res.status(404).json({ error: 'No se encontraron imágenes' });
@@ -203,7 +227,6 @@ app.get('/chapter/:mangaSlug/:chapterSlug/images',
 
 // ── GET /latest ───────────────────────────────────────────────────
 app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query), { ttlSeconds: 180 }), async (req, res) => {
-    console.log('[Latest] Obteniendo manga recientes');
     try {
         const includeMeta = String(req.query.includeMeta || '').toLowerCase() === '1' || String(req.query.includeMeta || '').toLowerCase() === 'true';
         const payload = includeMeta ? await getLatestWithMeta() : { results: await getLatest(), diagnostics: undefined };
@@ -220,7 +243,6 @@ app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query), {
 });
 
 app.get('/latest/health', withCache((req) => buildQueryCacheKey('latest-health', req.query), { ttlSeconds: 120 }), async (req, res) => {
-    console.log('[Latest][Health] Diagnostico de fuentes');
     try {
         const payload = await getLatestWithMeta();
         res.sendCached(payload.diagnostics);
@@ -231,12 +253,5 @@ app.get('/latest/health', withCache((req) => buildQueryCacheKey('latest-health',
 });
 
 app.listen(PORT, () => {
-    console.log(`\n🚀 ZonaTMO API corriendo en http://localhost:${PORT}`);
-    console.log(`   GET /search?title=<titulo>`);
-    console.log(`   GET /manga/:slug`);
-    console.log(`   GET /manga/:slug/chapters`);
-    console.log(`   GET /chapter/:mangaSlug/:chapterSlug/images`);
-    console.log(`   GET /latest\n`);
-    console.log(`   GET /latest?includeMeta=1`);
-    console.log(`   GET /latest/health\n`);
+    console.log(`ZonaTMO API running on port ${PORT}`);
 });

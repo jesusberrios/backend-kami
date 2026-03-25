@@ -68,8 +68,6 @@ const zonatmoClient = wrapper(axios.create({
     jar: zonatmoJar,
     timeout: REQUEST_TIMEOUT_MS,
     maxRedirects: 5,
-    httpAgent,
-    httpsAgent,
     headers: defaultHeaders,
 }));
 
@@ -105,7 +103,6 @@ const warmUpZonaTmo = async () => {
     try {
         await zonatmoClient.get(`${ZONATMO_BASE}/home`);
         warmUpDone = true;
-        console.log('[Scraper] Warm-up OK');
     } catch (err) {
         console.warn('[Scraper] Warm-up failed (non-critical):', err.message);
     } finally {

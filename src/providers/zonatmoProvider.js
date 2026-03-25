@@ -52,9 +52,40 @@ const buildBadges = ({ status, contentRating, score }) => {
     return badges;
 };
 
+const ADULT_HINTS_REGEX = /\b(18\+|\+18|adult|adults|hentai|ecchi|smut|nsfw|porn|sex|erot|yaoi|yuri|doujin|doujinshi|manhwa\s*adulto?)\b/i;
+
+const inferEroticaFromText = (...values) => {
+    const text = values
+        .flatMap((value) => {
+            if (!value) return [];
+            if (Array.isArray(value)) return value;
+            if (typeof value === 'object') {
+                return [value.name, value.label, value.slug, value.text, value.title, value.value];
+            }
+            return [value];
+        })
+        .map((x) => String(x || '').toLowerCase())
+        .join(' ');
+
+    return ADULT_HINTS_REGEX.test(text);
+};
+
 const toMangaCard = (item) => {
     const status = normalizeStatus(item.status || item.publication_status);
-    const contentRating = normalizeContentRating(item.content_rating || item.rating);
+    const inferredErotica = inferEroticaFromText(
+        item.content_rating,
+        item.rating,
+        item.title,
+        item.overview,
+        item.subtitle,
+        item.genres,
+        item.tags,
+        item.categories,
+        item.demography
+    );
+    const contentRating = inferredErotica
+        ? 'erotica'
+        : normalizeContentRating(item.content_rating || item.rating);
     const genres = normalizeGenres(item.genres || item.tags || item.categories);
     const country = String(item.country || 'jp').toLowerCase();
     const language = String(item.lang || 'es-419').toLowerCase();
@@ -188,7 +219,6 @@ const loadMangaCatalogFromSitemap = async () => {
     }
 
     catalogCache = { ts: now, items: unique };
-    console.log(`[Sitemap] Catalog loaded: ${unique.length} manga`);
     return unique;
     })();
 
@@ -237,7 +267,6 @@ const getMangaDetails = async (mangaToken) => {
     const { slug } = parseSourceSlug(mangaToken);
     const mangaUrl = `${ZONATMO_BASE}/manga/${slug}`;
     const apiBase = `${ZONATMO_BASE}/wp-api/api/single/manga/${slug}`;
-    console.log(`[Manga][zonatmo] API fetch: ${apiBase}`);
 
     let title = '';
     let altTitles = '';
@@ -320,7 +349,6 @@ const getMangaDetails = async (mangaToken) => {
         }
     }
 
-    console.log(`[Manga][zonatmo] "${title}" - ${chapters.length} chapters`);
     return {
         title,
         altTitles,
@@ -347,7 +375,6 @@ const getChapterImages = async (mangaSlug, chapterSlug, compositeSlugForLogs) =>
     await warmUpZonaTmo();
 
     const apiUrl = `${ZONATMO_BASE}/wp-api/api/single/manga/${mangaSlug}/${chapterSlug}`;
-    console.log(`[Chapter][zonatmo] API fetch: ${apiUrl}`);
 
     const { data } = await zonatmoClient.get(apiUrl, {
         headers: { Referer: `${ZONATMO_BASE}/manga/${mangaSlug}/${chapterSlug}` },
@@ -371,16 +398,61 @@ const getChapterImages = async (mangaSlug, chapterSlug, compositeSlugForLogs) =>
 const getLatest = async () => {
     await warmUpZonaTmo();
 
-    try {
-        const { data } = await zonatmoClient.get(`${ZONATMO_BASE}/wp-api/api/tops/views/week`, {
-            params: { postType: 'any', postsPerPage: 20 },
-            headers: { Referer: `${ZONATMO_BASE}/home` },
-        });
-        if (!data.error && data.data && data.data.items && data.data.items.length > 0) {
-            return data.data.items.map((item) => toMangaCard(item));
+    const toValidCards = (items) => {
+        return (items || [])
+            .map((item) => toMangaCard(item))
+            .filter((item) => item?.slug);
+    };
+
+    const tryEndpoint = async (label, params) => {
+        try {
+            const { data } = await zonatmoClient.get(`${ZONATMO_BASE}/wp-api/api/tops/views/week`, {
+                params,
+                headers: { Referer: `${ZONATMO_BASE}/home` },
+            });
+
+            const cards = toValidCards(data?.data?.items);
+            if (cards.length > 0) {
+                return cards;
+            }
+        } catch (err) {
+            console.warn(`[Latest][zonatmo] ${label} failed:`, err.message);
         }
-    } catch (err) {
-        console.warn('[Latest][zonatmo] Tops API failed:', err.message);
+
+        return [];
+    };
+
+    const tryListingFallback = async () => {
+        try {
+            const { data } = await zonatmoClient.get(`${ZONATMO_BASE}/wp-api/api/listing/manga`, {
+                params: { page: 1, postsPerPage: 20, orderBy: 'ID', order: 'desc' },
+                headers: { Referer: `${ZONATMO_BASE}/library` },
+            });
+
+            const cards = toValidCards(data?.data?.items);
+            if (cards.length > 0) {
+                return cards;
+            }
+        } catch (err) {
+            console.warn('[Latest][zonatmo] Listing fallback failed:', err.message);
+        }
+
+        return [];
+    };
+
+    const topsAny = await tryEndpoint('tops:any', { postType: 'any', postsPerPage: 20 });
+    if (topsAny.length > 0) {
+        return topsAny;
+    }
+
+    const topsManga = await tryEndpoint('tops:manga', { postType: 'manga', postsPerPage: 20 });
+    if (topsManga.length > 0) {
+        return topsManga;
+    }
+
+    const listing = await tryListingFallback();
+    if (listing.length > 0) {
+        return listing;
     }
 
     try {
