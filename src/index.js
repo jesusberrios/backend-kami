@@ -121,6 +121,8 @@ const withCache = (keyFn, options = {}) => async (req, res, next) => {
         resolveShared = resolve;
         rejectShared = reject;
     });
+    // Avoid process crashes on Node >= 22 when a shared request is rejected and no follower awaited it.
+    sharedPromise.catch(() => {});
     inFlightByKey.set(key, sharedPromise);
 
     const finishWithError = (message) => {
