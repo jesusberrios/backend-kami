@@ -4,7 +4,12 @@ const { searchManga, getMangaDetails, getMangaChapters, getChapterImages, getLat
 const { normalizeText } = require('./providers/textUtils');
 
 const app = express();
-const cache = new NodeCache({ stdTTL: 300 }); // 5 min cache
+const cache = new NodeCache({
+    stdTTL: 300,
+    checkperiod: 120,
+    useClones: false,
+});
+const inFlightByKey = new Map();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -44,7 +49,7 @@ const applyListQuery = (items, query = {}) => {
     if (query.sort === 'score_desc') list.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
     if (query.sort === 'chapters_desc') list.sort((a, b) => Number(b.totalChapters || 0) - Number(a.totalChapters || 0));
 
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 20)));
+    const limit = Math.max(1, Math.min(50, Number(query.limit || 20)));
     const page = Math.max(1, Number(query.page || 1));
     const total = list.length;
     const offset = (page - 1) * limit;
@@ -61,17 +66,73 @@ const applyListQuery = (items, query = {}) => {
 };
 
 // Middleware de cache
-const withCache = (keyFn) => async (req, res, next) => {
+const withCache = (keyFn, options = {}) => async (req, res, next) => {
+    const ttlSeconds = Number(options.ttlSeconds || 0);
     const key = keyFn(req);
     const cached = cache.get(key);
     if (cached) {
         console.log(`[Cache] HIT: ${key}`);
         return res.json(cached);
     }
+
+    const inFlight = inFlightByKey.get(key);
+    if (inFlight) {
+        console.log(`[Cache] INFLIGHT: ${key}`);
+        try {
+            const shared = await inFlight;
+            return res.json(shared);
+        } catch (_) {
+            // If shared execution failed, continue and retry once in this request.
+        }
+    }
+
+    let done = false;
+    let resolveShared;
+    let rejectShared;
+    const sharedPromise = new Promise((resolve, reject) => {
+        resolveShared = resolve;
+        rejectShared = reject;
+    });
+    inFlightByKey.set(key, sharedPromise);
+
+    const finishWithError = (message) => {
+        if (done) return;
+        done = true;
+        rejectShared(new Error(message));
+        if (inFlightByKey.get(key) === sharedPromise) {
+            inFlightByKey.delete(key);
+        }
+    };
+
     res.sendCached = (data) => {
-        cache.set(key, data);
+        if (done) return res.json(data);
+        done = true;
+
+        if (ttlSeconds > 0) {
+            cache.set(key, data, ttlSeconds);
+        } else {
+            cache.set(key, data);
+        }
+
+        resolveShared(data);
+        if (inFlightByKey.get(key) === sharedPromise) {
+            inFlightByKey.delete(key);
+        }
         res.json(data);
     };
+
+    res.once('close', () => {
+        if (!res.writableEnded) {
+            finishWithError(`Request closed before cache write for key: ${key}`);
+        }
+    });
+
+    res.once('finish', () => {
+        if (!done && res.statusCode >= 400) {
+            finishWithError(`Request failed for key: ${key} (status ${res.statusCode})`);
+        }
+    });
+
     next();
 };
 
@@ -81,7 +142,7 @@ app.get('/', (req, res) => {
 });
 
 // ── GET /search?title=xxx ─────────────────────────────────────────
-app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query)), async (req, res) => {
+app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query), { ttlSeconds: 600 }), async (req, res) => {
     const { title } = req.query;
     if (!title) return res.status(400).json({ error: 'Parámetro "title" requerido' });
 
@@ -97,7 +158,7 @@ app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query)), 
 });
 
 // ── GET /manga/:slug ──────────────────────────────────────────────
-app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`), async (req, res) => {
+app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`, { ttlSeconds: 1800 }), async (req, res) => {
     const { slug } = req.params;
     console.log(`[Manga] Detalles de: "${slug}"`);
     try {
@@ -110,7 +171,7 @@ app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`), async (r
 });
 
 // ── GET /manga/:slug/chapters ─────────────────────────────────────
-app.get('/manga/:slug/chapters', withCache((req) => `chapters:${req.params.slug}`), async (req, res) => {
+app.get('/manga/:slug/chapters', withCache((req) => `chapters:${req.params.slug}`, { ttlSeconds: 1800 }), async (req, res) => {
     const { slug } = req.params;
     console.log(`[Chapters] Capítulos de: "${slug}"`);
     try {
@@ -125,7 +186,7 @@ app.get('/manga/:slug/chapters', withCache((req) => `chapters:${req.params.slug}
 // ── GET /chapter/:mangaSlug/:chapterSlug/images ───────────────────
 // compositeSlug = "{manga-slug}/{chapter-slug}"  e.g. jujutsu-kaisen/epilogos
 app.get('/chapter/:mangaSlug/:chapterSlug/images',
-    withCache((req) => `images:${req.params.mangaSlug}/${req.params.chapterSlug}`),
+    withCache((req) => `images:${req.params.mangaSlug}/${req.params.chapterSlug}`, { ttlSeconds: 21600 }),
     async (req, res) => {
         const { mangaSlug, chapterSlug } = req.params;
         const compositeSlug = `${mangaSlug}/${chapterSlug}`;
@@ -141,7 +202,7 @@ app.get('/chapter/:mangaSlug/:chapterSlug/images',
     });
 
 // ── GET /latest ───────────────────────────────────────────────────
-app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query)), async (req, res) => {
+app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query), { ttlSeconds: 180 }), async (req, res) => {
     console.log('[Latest] Obteniendo manga recientes');
     try {
         const includeMeta = String(req.query.includeMeta || '').toLowerCase() === '1' || String(req.query.includeMeta || '').toLowerCase() === 'true';
@@ -158,7 +219,7 @@ app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query)), 
     }
 });
 
-app.get('/latest/health', withCache((req) => buildQueryCacheKey('latest-health', req.query)), async (req, res) => {
+app.get('/latest/health', withCache((req) => buildQueryCacheKey('latest-health', req.query), { ttlSeconds: 120 }), async (req, res) => {
     console.log('[Latest][Health] Diagnostico de fuentes');
     try {
         const payload = await getLatestWithMeta();

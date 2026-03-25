@@ -151,12 +151,13 @@ const getLatestWithMeta = async () => {
         }
     };
 
-    await runSource(SOURCE_ZONATMO, () => zonatmoProvider.getLatest());
-
-    await runSource(SOURCE_VISORMANGA, () => htmlProvider.getLatestFromHome({
+    await Promise.all([
+        runSource(SOURCE_ZONATMO, () => zonatmoProvider.getLatest()),
+        runSource(SOURCE_VISORMANGA, () => htmlProvider.getLatestFromHome({
             baseUrl: VISORMANGA_BASE,
             source: SOURCE_VISORMANGA,
-        }));
+        })),
+    ]);
 
     return {
         results: all,

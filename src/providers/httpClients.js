@@ -1,8 +1,29 @@
+const http = require('http');
+const https = require('https');
 const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
 const cloudscraper = require('cloudscraper');
 const { ZONATMO_BASE } = require('./constants');
+
+const REQUEST_TIMEOUT_MS = Math.max(3000, Number(process.env.SCRAPER_HTTP_TIMEOUT_MS || 12000));
+const MAX_SOCKETS = Math.max(4, Number(process.env.SCRAPER_MAX_SOCKETS || 30));
+const MAX_FREE_SOCKETS = Math.max(2, Number(process.env.SCRAPER_MAX_FREE_SOCKETS || 10));
+const KEEP_ALIVE_MSECS = Math.max(1000, Number(process.env.SCRAPER_KEEP_ALIVE_MSECS || 10000));
+
+const httpAgent = new http.Agent({
+    keepAlive: true,
+    maxSockets: MAX_SOCKETS,
+    maxFreeSockets: MAX_FREE_SOCKETS,
+    keepAliveMsecs: KEEP_ALIVE_MSECS,
+});
+
+const httpsAgent = new https.Agent({
+    keepAlive: true,
+    maxSockets: MAX_SOCKETS,
+    maxFreeSockets: MAX_FREE_SOCKETS,
+    keepAliveMsecs: KEEP_ALIVE_MSECS,
+});
 
 const defaultHeaders = {
     'User-Agent':                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -45,14 +66,18 @@ const sharedAxiosProxy = parseProxyUrl(sharedProxyUrl);
 const zonatmoJar = new CookieJar();
 const zonatmoClient = wrapper(axios.create({
     jar: zonatmoJar,
-    timeout: 20000,
+    timeout: REQUEST_TIMEOUT_MS,
     maxRedirects: 5,
+    httpAgent,
+    httpsAgent,
     headers: defaultHeaders,
 }));
 
 const htmlClient = axios.create({
-    timeout: 20000,
+    timeout: REQUEST_TIMEOUT_MS,
     maxRedirects: 5,
+    httpAgent,
+    httpsAgent,
     headers: defaultHeaders,
     proxy: sharedAxiosProxy || undefined,
 });
@@ -61,7 +86,7 @@ const cloudGet = async (url, extraHeaders = {}) => {
     return cloudscraper.get({
         uri: url,
         gzip: true,
-        timeout: 20000,
+        timeout: REQUEST_TIMEOUT_MS,
         proxy: sharedProxyUrl || undefined,
         headers: {
             ...defaultHeaders,
@@ -71,15 +96,24 @@ const cloudGet = async (url, extraHeaders = {}) => {
 };
 
 let warmUpDone = false;
+let warmUpInFlight = null;
 const warmUpZonaTmo = async () => {
     if (warmUpDone) return;
+    if (warmUpInFlight) return warmUpInFlight;
+
+    warmUpInFlight = (async () => {
     try {
         await zonatmoClient.get(`${ZONATMO_BASE}/home`);
         warmUpDone = true;
         console.log('[Scraper] Warm-up OK');
     } catch (err) {
         console.warn('[Scraper] Warm-up failed (non-critical):', err.message);
+    } finally {
+        warmUpInFlight = null;
     }
+    })();
+
+    return warmUpInFlight;
 };
 
 module.exports = {

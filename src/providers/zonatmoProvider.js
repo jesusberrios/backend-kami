@@ -78,8 +78,27 @@ const toMangaCard = (item) => {
     };
 };
 
-const CATALOG_CACHE_TTL_MS = 30 * 60 * 1000;
+const CATALOG_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.SCRAPER_CATALOG_CACHE_TTL_MS || 30 * 60 * 1000));
+const SITEMAP_FETCH_CONCURRENCY = Math.max(1, Number(process.env.SCRAPER_SITEMAP_CONCURRENCY || 3));
 let catalogCache = { ts: 0, items: [] };
+let catalogLoadInFlight = null;
+
+const mapWithConcurrency = async (items, limit, mapper) => {
+    if (!Array.isArray(items) || items.length === 0) return [];
+
+    const results = new Array(items.length);
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (idx < items.length) {
+            const current = idx;
+            idx += 1;
+            results[current] = await mapper(items[current], current);
+        }
+    });
+
+    await Promise.all(workers);
+    return results;
+};
 
 const parseSitemapUrls = async (url) => {
     const { data } = await zonatmoClient.get(url, {
@@ -100,6 +119,12 @@ const loadMangaCatalogFromSitemap = async () => {
         return catalogCache.items;
     }
 
+    if (catalogLoadInFlight) {
+        return catalogLoadInFlight;
+    }
+
+    catalogLoadInFlight = (async () => {
+
     const { data } = await zonatmoClient.get(`${ZONATMO_BASE}/wp-sitemap.xml`, {
         headers: { Referer: `${ZONATMO_BASE}/home` },
     });
@@ -113,15 +138,17 @@ const loadMangaCatalogFromSitemap = async () => {
         }
     });
 
-    const sitemapResults = await Promise.all(
-        mangaSitemaps.map(async (smUrl) => {
+    const sitemapResults = await mapWithConcurrency(
+        mangaSitemaps,
+        SITEMAP_FETCH_CONCURRENCY,
+        async (smUrl) => {
             try {
                 return await parseSitemapUrls(smUrl);
             } catch (err) {
                 console.warn(`[Sitemap] Failed ${smUrl}:`, err.message);
                 return [];
             }
-        })
+        }
     );
 
     const all = [];
@@ -163,6 +190,13 @@ const loadMangaCatalogFromSitemap = async () => {
     catalogCache = { ts: now, items: unique };
     console.log(`[Sitemap] Catalog loaded: ${unique.length} manga`);
     return unique;
+    })();
+
+    try {
+        return await catalogLoadInFlight;
+    } finally {
+        catalogLoadInFlight = null;
+    }
 };
 
 const search = async (title) => {
