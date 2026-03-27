@@ -20,7 +20,8 @@ Railway will detect the Dockerfile and build from it.
 Set these env vars in Railway service settings:
 
 - `PORT=3000`
-- `SCRAPER_PROXY_URL` (optional)
+- `SCRAPER_PROXY_URL` (optional, global fallback for all providers)
+- `MANHWAONLINE_PROXY_URL` (optional, recommended if only manhwa-online needs proxy)
 
 Proxy format:
 
@@ -40,6 +41,7 @@ Expected health output includes source diagnostics for:
 
 - `zonatmo`
 - `visormanga`
+- `manhwaonline`
 
 ## 5) Connect app
 

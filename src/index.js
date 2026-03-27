@@ -181,7 +181,6 @@ app.get('/search', withCache((req) => buildQueryCacheKey('search', req.query), {
         const filtered = applyListQuery(results, req.query);
         res.sendCached(filtered);
     } catch (err) {
-        console.error('[Search] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -193,7 +192,6 @@ app.get('/manga/:slug', withCache((req) => `manga:${req.params.slug}`, { ttlSeco
         const manga = await getMangaDetails(slug);
         res.sendCached({ manga: withStatusPresentation(manga) });
     } catch (err) {
-        console.error('[Manga] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -205,7 +203,6 @@ app.get('/manga/:slug/chapters', withCache((req) => `chapters:${req.params.slug}
         const chapters = await getMangaChapters(slug);
         res.sendCached({ chapters });
     } catch (err) {
-        console.error('[Chapters] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -222,7 +219,6 @@ app.get('/chapter/:mangaSlug/:chapterSlug/images',
             if (!images.length) return res.status(404).json({ error: 'No se encontraron imágenes' });
             res.sendCached({ images });
         } catch (err) {
-            console.error('[Images] Error:', err.message);
             res.status(500).json({ error: err.message });
         }
     });
@@ -239,7 +235,6 @@ app.get('/latest', withCache((req) => buildQueryCacheKey('latest', req.query), {
         }
         res.sendCached(filtered);
     } catch (err) {
-        console.error('[Latest] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -249,11 +244,10 @@ app.get('/latest/health', withCache((req) => buildQueryCacheKey('latest-health',
         const payload = await getLatestWithMeta();
         res.sendCached(payload.diagnostics);
     } catch (err) {
-        console.error('[Latest][Health] Error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`ZonaTMO API running on port ${PORT}`);
+    if (process.env.DEBUG) console.log(`Server running on port ${PORT}`);
 });

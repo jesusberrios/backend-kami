@@ -1,6 +1,8 @@
 const {
     SOURCE_ZONATMO,
     SOURCE_VISORMANGA,
+    SOURCE_MANHWAONLINE,
+    SOURCE_LECTORMANGAA_LEGACY,
     SOURCE_DELIMITER,
 } = require('./constants');
 
@@ -21,9 +23,15 @@ const parseSourceSlug = (value) => {
     const slug = raw.slice(idx + SOURCE_DELIMITER.length);
     if (!slug) return { source: SOURCE_ZONATMO, slug: raw };
 
-    if (![SOURCE_ZONATMO, SOURCE_VISORMANGA].includes(source)) {
+    if (![SOURCE_ZONATMO, SOURCE_VISORMANGA, SOURCE_MANHWAONLINE, SOURCE_LECTORMANGAA_LEGACY].includes(source)) {
         return { source: SOURCE_ZONATMO, slug: raw };
     }
+
+    // Backward compatibility for previously stored tokens.
+    if (source === SOURCE_LECTORMANGAA_LEGACY) {
+        return { source: SOURCE_MANHWAONLINE, slug };
+    }
+
     return { source, slug };
 };
 

@@ -1,11 +1,13 @@
 const {
     SOURCE_ZONATMO,
     SOURCE_VISORMANGA,
+    SOURCE_MANHWAONLINE,
     VISORMANGA_BASE,
 } = require('./constants');
 const { parseSourceSlug, splitCompositeSlug } = require('./slugUtils');
 const zonatmoProvider = require('./zonatmoProvider');
 const htmlProvider = require('./htmlProvider');
+const manhwaonlineProvider = require('./manhwaonlineProvider');
 
 const interleaveBySource = (items, maxItems = 20, options = {}) => {
     const reserveQuota = options.reserveQuota !== false;
@@ -96,6 +98,7 @@ const searchManga = async (title) => {
             source: SOURCE_VISORMANGA,
             query: title,
         })),
+        runSource(SOURCE_MANHWAONLINE, () => manhwaonlineProvider.search(title)),
     ]);
 
     if (all.length === 0) {
@@ -130,6 +133,10 @@ const getMangaDetails = async (mangaToken) => {
         });
     }
 
+    if (source === SOURCE_MANHWAONLINE) {
+        return manhwaonlineProvider.getMangaDetails(mangaToken);
+    }
+
     return zonatmoProvider.getMangaDetails(mangaToken);
 };
 
@@ -152,6 +159,11 @@ const getChapterImages = async (compositeSlug) => {
             baseUrl: VISORMANGA_BASE,
             chapterSlug,
         });
+        return images;
+    }
+
+    if (source === SOURCE_MANHWAONLINE) {
+        const images = await manhwaonlineProvider.getChapterImages(mangaSlug, chapterSlug);
         return images;
     }
 
@@ -210,6 +222,7 @@ const getLatestWithMeta = async () => {
             baseUrl: VISORMANGA_BASE,
             source: SOURCE_VISORMANGA,
         })),
+        runSource(SOURCE_MANHWAONLINE, () => manhwaonlineProvider.getLatest()),
     ]);
 
     const mixedResults = interleaveBySource(all, Math.max(40, all.length), { reserveQuota: true });

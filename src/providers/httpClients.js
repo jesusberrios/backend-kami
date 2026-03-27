@@ -4,7 +4,7 @@ const axios = require('axios');
 const { wrapper } = require('axios-cookiejar-support');
 const { CookieJar } = require('tough-cookie');
 const cloudscraper = require('cloudscraper');
-const { ZONATMO_BASE } = require('./constants');
+const { ZONATMO_BASE, MANHWAONLINE_BASE } = require('./constants');
 
 const REQUEST_TIMEOUT_MS = Math.max(3000, Number(process.env.SCRAPER_HTTP_TIMEOUT_MS || 12000));
 const MAX_SOCKETS = Math.max(4, Number(process.env.SCRAPER_MAX_SOCKETS || 30));
@@ -62,6 +62,28 @@ const parseProxyUrl = (proxyUrl) => {
 
 const sharedProxyUrl = process.env.SCRAPER_PROXY_URL || '';
 const sharedAxiosProxy = parseProxyUrl(sharedProxyUrl);
+const manhwaonlineProxyUrl = process.env.MANHWAONLINE_PROXY_URL || process.env.LECTORMANGAA_PROXY_URL || '';
+const manhwaonlineAxiosProxy = parseProxyUrl(manhwaonlineProxyUrl);
+
+const isManhwaonlineUrl = (url) => {
+    try {
+        const parsed = new URL(url);
+        const targetHost = new URL(MANHWAONLINE_BASE).hostname;
+        return parsed.hostname === targetHost || parsed.hostname.endsWith(`.${targetHost}`);
+    } catch (_) {
+        return false;
+    }
+};
+
+const resolveAxiosProxyByUrl = (url) => {
+    if (isManhwaonlineUrl(url) && manhwaonlineAxiosProxy) return manhwaonlineAxiosProxy;
+    return sharedAxiosProxy || undefined;
+};
+
+const resolveProxyUrlByTarget = (url) => {
+    if (isManhwaonlineUrl(url) && manhwaonlineProxyUrl) return manhwaonlineProxyUrl;
+    return sharedProxyUrl || '';
+};
 
 const zonatmoJar = new CookieJar();
 const zonatmoClient = wrapper(axios.create({
@@ -80,12 +102,21 @@ const htmlClient = axios.create({
     proxy: sharedAxiosProxy || undefined,
 });
 
+htmlClient.interceptors.request.use((config) => {
+    const url = String(config.url || '');
+    const targetProxy = resolveAxiosProxyByUrl(url);
+    if (targetProxy) {
+        config.proxy = targetProxy;
+    }
+    return config;
+});
+
 const cloudGet = async (url, extraHeaders = {}) => {
     return cloudscraper.get({
         uri: url,
         gzip: true,
         timeout: REQUEST_TIMEOUT_MS,
-        proxy: sharedProxyUrl || undefined,
+        proxy: resolveProxyUrlByTarget(url) || undefined,
         headers: {
             ...defaultHeaders,
             ...extraHeaders,

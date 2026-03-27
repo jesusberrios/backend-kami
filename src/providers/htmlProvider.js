@@ -39,6 +39,170 @@ const inferContentRating = (...values) => {
     return ADULT_HINTS_REGEX.test(text) ? 'erotica' : 'safe';
 };
 
+const CHAPTER_SITEMAP_CACHE_TTL_MS = Math.max(10 * 60 * 1000, Number(process.env.SCRAPER_CHAPTER_SITEMAP_CACHE_TTL_MS || 60 * 60 * 1000));
+const chapterSitemapIndexCache = { ts: 0, urls: [] };
+const chapterSitemapByMangaCache = new Map();
+
+const loadChapterSitemapIndex = async (baseUrl) => {
+    const now = Date.now();
+    if (chapterSitemapIndexCache.urls.length > 0 && now - chapterSitemapIndexCache.ts < CHAPTER_SITEMAP_CACHE_TTL_MS) {
+        return chapterSitemapIndexCache.urls;
+    }
+
+    const { data } = await htmlClient.get(`${baseUrl}/sitemap_index.xml`, {
+        headers: { Referer: baseUrl },
+    });
+
+    const $ = cheerio.load(data, { xmlMode: true });
+    const urls = [];
+    $('sitemap > loc').each((_, el) => {
+        const loc = $(el).text().trim();
+        if (/wp-manga-chapters-sitemap/i.test(loc)) {
+            urls.push(loc);
+        }
+    });
+
+    chapterSitemapIndexCache.ts = now;
+    chapterSitemapIndexCache.urls = urls;
+    return urls;
+};
+
+const loadChaptersFromSitemap = async (baseUrl, mangaSlug) => {
+    const cacheKey = `${baseUrl}|${mangaSlug}`;
+    const now = Date.now();
+    const cached = chapterSitemapByMangaCache.get(cacheKey);
+    if (cached && now - cached.ts < CHAPTER_SITEMAP_CACHE_TTL_MS) {
+        return cached.chapters;
+    }
+
+    const sitemapUrls = await loadChapterSitemapIndex(baseUrl);
+    const escapedSlug = String(mangaSlug || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`/manga/${escapedSlug}/([^/?#<]+)`, 'gi');
+
+    let chapterUrls = [];
+    for (const sitemapUrl of sitemapUrls) {
+        try {
+            const { data } = await htmlClient.get(sitemapUrl, {
+                headers: { Referer: `${baseUrl}/manga/${mangaSlug}/` },
+            });
+            const text = String(data || '');
+            regex.lastIndex = 0;
+            if (!regex.test(text)) continue;
+            regex.lastIndex = 0;
+
+            const seen = new Set();
+            let match;
+            while ((match = regex.exec(text))) {
+                const full = String(match[0] || '').trim();
+                if (!full || seen.has(full)) continue;
+                seen.add(full);
+                chapterUrls.push(full);
+            }
+
+            if (chapterUrls.length > 0) break;
+        } catch (_) {
+            // Ignore one sitemap failure and continue with the next.
+        }
+    }
+
+    const chapters = chapterUrls.map((url) => {
+        const m = String(url).match(new RegExp(`/manga/${escapedSlug}/([^/?#<]+)`, 'i'));
+        const chapterSlug = m ? m[1] : '';
+        const label = titleFromSlug(chapterSlug).replace(/^capitulo[-\s]*/i, 'Capitulo ');
+        return {
+            chapterSlug,
+            title: label || `Capitulo ${chapterSlug}`,
+            number: parseChapterNumber(label || chapterSlug),
+            releaseDate: '',
+            lang: 'es-419',
+            groupName: '',
+            url: `${baseUrl}/manga/${mangaSlug}/${chapterSlug}/`,
+        };
+    }).filter((x) => x.chapterSlug);
+
+    chapterSitemapByMangaCache.set(cacheKey, {
+        ts: now,
+        chapters,
+    });
+
+    return chapters;
+};
+
+const normalizeDescription = (value) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    // Ignore CSS/JS-like blobs accidentally captured from inline blocks.
+    if ((text.includes('{') && text.includes('}')) || /\.swiper|max-width|padding:\s*\d/i.test(text)) {
+        return '';
+    }
+    return text;
+};
+
+const extractChapterSlugFromHref = (href, mangaSlug) => {
+    const byLeer = href.match(/\/leer\/([^/?#]+)/i);
+    if (byLeer) {
+        return {
+            chapterSlug: byLeer[1],
+            chapterUrl: byLeer[0].startsWith('http') ? byLeer[0] : '',
+        };
+    }
+
+    const escapedSlug = String(mangaSlug || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const byMangaChapter = escapedSlug
+        ? href.match(new RegExp(`/manga/${escapedSlug}/([^/?#]+)`, 'i'))
+        : null;
+    if (byMangaChapter) {
+        return {
+            chapterSlug: byMangaChapter[1],
+            chapterUrl: '',
+        };
+    }
+
+    return { chapterSlug: '', chapterUrl: '' };
+};
+
+const decodeMowlToken = (token, xorKey = 30) => {
+    try {
+        const decoded = Buffer.from(String(token || ''), 'base64').toString('binary');
+        let out = '';
+        for (let i = 0; i < decoded.length; i += 1) {
+            out += String.fromCharCode(decoded.charCodeAt(i) ^ xorKey);
+        }
+        return out;
+    } catch (_) {
+        return '';
+    }
+};
+
+const extractMowlImages = ($, baseUrl, html) => {
+    const scriptMatch = String(html || '').match(/var\s+_d\s*=\s*(\[[\s\S]*?\]);/i);
+    if (!scriptMatch) return [];
+
+    let encoded = [];
+    try {
+        encoded = JSON.parse(scriptMatch[1]);
+    } catch (_) {
+        return [];
+    }
+    if (!Array.isArray(encoded) || encoded.length === 0) return [];
+
+    const decoded = encoded.map((token) => decodeMowlToken(token, 30));
+    const urls = [];
+
+    $('.wp-manga-chapter-img').each((_, img) => {
+        const src = String($(img).attr('src') || $(img).attr('data-src') || '');
+        const m = src.match(/#mowl-(\d+)/i);
+        if (!m) return;
+        const idx = Number(m[1]);
+        const real = decoded[idx] || '';
+        if (real && /^https?:\/\//i.test(real)) {
+            urls.push(real);
+        }
+    });
+
+    return [...new Set(urls)].map((url) => absoluteUrl(baseUrl, url));
+};
+
 const mangaSlugFromReaderSlug = (readerSlug) => {
     const raw = String(readerSlug || '').trim();
     if (!raw) return '';
@@ -214,8 +378,8 @@ const getMangaDetails = async ({ baseUrl, source, slug, originalToken }) => {
         '';
 
     const description =
-        $('meta[name="description"]').attr('content') ||
-        $('.description, .summary, .sinopsis, .content p').first().text().replace(/\s+/g, ' ').trim() ||
+        normalizeDescription($('meta[name="description"]').attr('content')) ||
+        normalizeDescription($('.summary__content, .description-summary, .description, .summary, .sinopsis, .content p').first().text()) ||
         '';
     const status = normalizeStatus($('.status, .estado').first().text());
     const genres = $('a[href*="genre"], a[href*="genero"], .genre, .genero')
@@ -227,17 +391,19 @@ const getMangaDetails = async ({ baseUrl, source, slug, originalToken }) => {
     const chapters = [];
     const seen = new Set();
 
-    $('a[href*="/leer/"]').each((_, a) => {
+    $('a[href]').each((_, a) => {
         const hrefRaw = $(a).attr('href') || '';
         const href = absoluteUrl(baseUrl, hrefRaw);
-        const match = href.match(/\/leer\/([^/?#]+)/);
-        if (!match) return;
+        const { chapterSlug } = extractChapterSlugFromHref(href, slug);
+        if (!chapterSlug) return;
 
-        const chapterSlug = match[1];
         if (seen.has(chapterSlug)) return;
         seen.add(chapterSlug);
 
         const label = $(a).text().replace(/\s+/g, ' ').trim();
+        const chapterUrl = /\/leer\//i.test(href)
+            ? href
+            : `${baseUrl}/manga/${slug}/${chapterSlug}/`;
         chapters.push({
             title: label || `Capitulo ${chapterSlug}`,
             number: parseChapterNumber(label),
@@ -247,9 +413,49 @@ const getMangaDetails = async ({ baseUrl, source, slug, originalToken }) => {
             chapterSlug,
             mangaSlug: originalToken,
             slug: `${originalToken}/${chapterSlug}`,
-            url: `${baseUrl}/leer/${chapterSlug}`,
+            url: chapterUrl,
         });
     });
+
+    // manhwa-online often renders only first/last chapter links in static HTML.
+    // Use provider sitemap chapters as fallback to reconstruct "Ultimos Capitulos" accurately.
+    if (/manhwa-online\.com$/i.test(String(baseUrl || ''))) {
+        try {
+            const fromSitemap = await loadChaptersFromSitemap(baseUrl, slug);
+            if (fromSitemap.length > chapters.length) {
+                const merged = new Map();
+                for (const chapter of fromSitemap) {
+                    merged.set(chapter.chapterSlug, {
+                        ...chapter,
+                        mangaSlug: originalToken,
+                        slug: `${originalToken}/${chapter.chapterSlug}`,
+                    });
+                }
+                for (const chapter of chapters) {
+                    const existing = merged.get(chapter.chapterSlug) || {};
+                    const chapterNumber = Number(chapter.number || 0);
+                    const hasMeaningfulNumber = Number.isFinite(chapterNumber) && chapterNumber > 0;
+                    const cleanTitle = String(chapter.title || '').trim();
+                    const hasGenericTitle = /^leer\s+(primero|ultimo)$/i.test(cleanTitle);
+                    merged.set(chapter.chapterSlug, {
+                        ...existing,
+                        ...chapter,
+                        number: hasMeaningfulNumber ? chapter.number : existing.number,
+                        title: cleanTitle && !hasGenericTitle ? chapter.title : existing.title,
+                        chapterSlug: chapter.chapterSlug,
+                        mangaSlug: originalToken,
+                        slug: `${originalToken}/${chapter.chapterSlug}`,
+                    });
+                }
+                chapters.length = 0;
+                chapters.push(...Array.from(merged.values()));
+            }
+        } catch (err) {
+            console.warn('[Manga][html] Chapter sitemap fallback failed:', err.message);
+        }
+    }
+
+    chapters.sort((a, b) => Number(b.number || 0) - Number(a.number || 0));
 
     return {
         title,
@@ -273,12 +479,20 @@ const getMangaDetails = async ({ baseUrl, source, slug, originalToken }) => {
     };
 };
 
-const getChapterImages = async ({ baseUrl, chapterSlug }) => {
-    const readerUrl = `${baseUrl}/leer/${chapterSlug}`;
+const getChapterImages = async ({ baseUrl, chapterSlug, mangaSlug = '' }) => {
+    const isMangaChapterStyle = /^capitulo[-\w.]+$/i.test(String(chapterSlug || ''));
+    const readerUrl = isMangaChapterStyle && mangaSlug
+        ? `${baseUrl}/manga/${mangaSlug}/${chapterSlug}/`
+        : `${baseUrl}/leer/${chapterSlug}`;
     const { data } = await htmlClient.get(readerUrl, {
         headers: { Referer: `${baseUrl}/biblioteca` },
     });
     const $ = cheerio.load(data);
+
+    const mowlImages = extractMowlImages($, baseUrl, data);
+    if (mowlImages.length > 0) {
+        return mowlImages.map((url, idx) => ({ url, page: idx + 1 }));
+    }
 
     const candidates = [];
     $('img').each((_, img) => {
